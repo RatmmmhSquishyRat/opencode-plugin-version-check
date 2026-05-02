@@ -1,0 +1,10 @@
+{
+  "name": "opencode-plugin-version-check",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that checks for outdated pinned-version plugins on startup",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/index.ts",
+    "./server": "./src/commands.ts"
+  }
+}
