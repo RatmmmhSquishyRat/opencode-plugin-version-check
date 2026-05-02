@@ -1,55 +1,109 @@
 /**
- * OpenCode Plugin: Version Check — TUI entry (debug)
+ * OpenCode Plugin: Version Check — TUI entry
  *
- * Registers TWO commands to help isolate why /plugin_status isn't appearing:
- *   1. Non-slashed "Plugin Version Check" → should appear in Ctrl+P palette
- *   2. /plugin_status slash command → should appear in "/" autocomplete
- *
- * Activation toast confirms the plugin loaded successfully.
+ * On startup: checks pinned-version plugins and notifies if any are outdated.
+ * Registers /plugin_status slash command for manual full listing.
+ * @latest entries are skipped during auto-check but included in manual listing.
  */
 
-import { buildStatusTable } from "./shared"
+import { buildStatusTable, fetchLatestVersion, isLocalPath, parseNpmSpec } from "./shared"
 
+// ---------------------------------------------------------------------------
+// Startup auto-check: notify only for outdated pinned plugins (skip @latest)
+// ---------------------------------------------------------------------------
+async function startupCheck(
+  specs: Array<string | [string, Record<string, unknown>]>,
+  signal: AbortSignal,
+  toast: (i: { variant?: string; title?: string; message: string; duration?: number }) => void,
+) {
+  // Parse configured specs — skip @latest entries and local paths
+  const pinned: { name: string; current: string }[] = []
+
+  for (const item of specs) {
+    const spec = Array.isArray(item) ? String(item[0] ?? "") : String(item)
+    if (!spec) continue
+    if (isLocalPath(spec)) continue
+
+    const parsed = parseNpmSpec(spec)
+    if (!parsed || parsed.kind !== "pinned") continue
+
+    pinned.push({ name: parsed.name, current: parsed.configured })
+  }
+
+  if (pinned.length === 0) return
+
+  // Fetch latest versions in parallel
+  interface Row { name: string; configured: string; latest: string; date: string }
+  const outdated: Row[] = []
+
+  await Promise.all(
+    pinned.map(async ({ name, current }) => {
+      if (signal.aborted) return
+      try {
+        const info = await fetchLatestVersion(name, signal)
+        if (info && info.version && info.version !== current) {
+          outdated.push({ name, configured: current, latest: info.version, date: info.date })
+        }
+      } catch {
+        // network error → skip, don't bother user
+      }
+    }),
+  )
+
+  if (outdated.length === 0) return
+
+  const label = outdated.length === 1 ? "plugin" : "plugins"
+  const lines = [
+    `**${outdated.length} ${label} outdated:**`,
+    "",
+    ...outdated.map((r) => {
+      const d = r.date ? ` (${r.date.slice(0, 10)})` : ""
+      return `- \`${r.name}\`: ${r.configured} → **${r.latest}**${d}`
+    }),
+    "",
+    "Use `/plugin_status` to see the full report.",
+  ]
+
+  toast({
+    variant: "warning",
+    title: "Plugin Update Available",
+    message: lines.join("\n"),
+    duration: 10_000,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Plugin entry
+// ---------------------------------------------------------------------------
 export default {
   id: "plugin-version-check",
-  tui: (api: Record<string, unknown>, _options: unknown, _meta: unknown) => {
-    const cmd = api.command as { register(cb: () => unknown[]): () => void }
-    const tuiCfg = api.tuiConfig as { plugin?: Array<string | [string, Record<string, unknown>]> }
-    const toast = (api.ui as { toast(i: { variant?: string; title?: string; message: string; duration?: number }): void }).toast.bind(api.ui)
-    const sig = (api.lifecycle as { signal: AbortSignal }).signal
-
-    // Confirm plugin activation
-    toast({
-      variant: "success",
-      title: "Version Check loaded",
-      message: "Plugin activated — registering commands…",
-      duration: 4_000,
-    })
-
-    const exec = async () => {
-      const raw = tuiCfg.plugin ?? []
-      const table = await buildStatusTable(raw, sig)
-      toast({ message: table, duration: 30_000 })
+  tui: async (api: Record<string, unknown>, _options: unknown, _meta: unknown) => {
+    const command = api.command as {
+      register(cb: () => unknown[]): () => void
     }
+    const tuiConfig = api.tuiConfig as { plugin?: Array<string | [string, Record<string, unknown>]> }
+    const toast = (api.ui as { toast(i: { variant?: string; title?: string; message: string; duration?: number }): void })
+      .toast.bind(api.ui)
+    const signal = (api.lifecycle as { signal: AbortSignal }).signal
 
-    // 1) Command palette (no slash)
-    cmd.register(() => [
-      {
-        title: "Plugin Version Check",
-        value: "plugin-version-check.palette",
-        description: "Debug: command palette entry — verify registration works",
-        onSelect: exec,
-      },
-    ])
+    // 1) Startup check for outdated pinned plugins
+    const specs = tuiConfig.plugin ?? []
+    void startupCheck(specs, signal, toast)
 
-    // 2) Slash command
-    cmd.register(() => [
+    // 2) Register /plugin_status slash command
+    command.register(() => [
       {
         title: "Plugin Version Status",
-        value: "plugin-version-check.slash",
+        value: "plugin-version-check.status",
         description: "List configured plugins vs npm registry (incl. release dates)",
         slash: { name: "plugin_status", aliases: ["plugins", "check-plugins"] },
-        onSelect: exec,
+        async onSelect() {
+          const table = await buildStatusTable(specs, signal)
+          toast({
+            message: table,
+            duration: 30_000,
+          })
+        },
       },
     ])
   },
