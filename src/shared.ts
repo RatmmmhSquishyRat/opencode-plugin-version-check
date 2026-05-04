@@ -1,6 +1,10 @@
+import { existsSync, readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import path from "node:path"
+
 // ---------------------------------------------------------------------------
-// Shared utilities: spec parsing, semver comparison, npm registry query.
-// Used by both the TUI notifier and the server slash-command tool.
+// Shared utilities: spec parsing, semver comparison, npm registry/cache query.
+// Used by the TUI notifier, server tool, and standalone CLI.
 // ---------------------------------------------------------------------------
 
 /**
@@ -101,6 +105,62 @@ export function parseNpmSpec(spec: string): NpmEntry | null {
   return { kind: "pinned", name, configured: clean }
 }
 
+export function npmPackageName(spec: string): string | null {
+  if (!spec || isLocalPath(spec)) return null
+
+  if (spec.startsWith("@")) {
+    const slash = spec.indexOf("/")
+    if (slash < 0) return null
+    const versionAt = spec.indexOf("@", slash + 1)
+    if (versionAt > 0 && !isRegistryVersion(spec.slice(versionAt + 1))) return null
+    return versionAt > 0 ? spec.slice(0, versionAt) : spec
+  }
+
+  const versionAt = spec.indexOf("@")
+  if (versionAt > 0 && !isRegistryVersion(spec.slice(versionAt + 1))) return null
+  return versionAt > 0 ? spec.slice(0, versionAt) : spec
+}
+
+function isRegistryVersion(version: string): boolean {
+  if (!version) return false
+  if (version.includes(":") || version.includes("/")) return false
+  if (version.startsWith("git+") || version.startsWith("http")) return false
+  return true
+}
+
+function sanitizeCacheName(spec: string): string {
+  if (process.platform !== "win32") return spec
+  const illegal = new Set(["<", ">", ":", '"', "|", "?", "*"])
+  return Array.from(spec, (char) => (illegal.has(char) || char.charCodeAt(0) < 32 ? "_" : char)).join("")
+}
+
+export function defaultCacheRoots(): string[] {
+  const roots = new Set<string>()
+  if (process.env.XDG_CACHE_HOME) roots.add(path.join(process.env.XDG_CACHE_HOME, "opencode"))
+  roots.add(path.join(homedir(), ".cache", "opencode"))
+  if (process.env.LOCALAPPDATA) roots.add(path.join(process.env.LOCALAPPDATA, "opencode"))
+  return Array.from(roots)
+}
+
+export function readInstalledVersion(spec: string, cacheRoots = defaultCacheRoots()): string | null {
+  const name = npmPackageName(spec)
+  if (!name) return null
+
+  const cacheName = sanitizeCacheName(spec)
+  for (const root of cacheRoots) {
+    const file = path.join(root, "packages", cacheName, "node_modules", name, "package.json")
+    if (!existsSync(file)) continue
+    try {
+      const pkg = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown }
+      return typeof pkg.version === "string" && pkg.version ? pkg.version : null
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}
+
 /** Simple semver comparison.  Returns true when candidate > reference. */
 export function isNewer(reference: string, candidate: string): boolean {
   const a = reference.split(".").map((n) => parseInt(n, 10) || 0)
@@ -156,6 +216,43 @@ export async function fetchLatestVersion(name: string, signal: AbortSignal): Pro
   }
 }
 
+export interface OutdatedPinnedRow {
+  name: string
+  configured: string
+  latest: string
+  date: string
+}
+
+export async function buildOutdatedPinnedRows(
+  specs: Array<string | [string, Record<string, unknown>]>,
+  signal: AbortSignal,
+  fetchLatest: typeof fetchLatestVersion = fetchLatestVersion,
+): Promise<OutdatedPinnedRow[]> {
+  const pinned: { name: string; current: string }[] = []
+
+  for (const item of specs) {
+    const spec = Array.isArray(item) ? String(item[0] ?? "") : String(item)
+    if (!spec) continue
+    if (isLocalPath(spec)) continue
+
+    const parsed = parseNpmSpec(spec)
+    if (!parsed || parsed.kind !== "pinned") continue
+
+    pinned.push({ name: parsed.name, current: parsed.configured })
+  }
+
+  const rows = await Promise.all(
+    pinned.map(async ({ name, current }) => {
+      if (signal.aborted) return null
+      const info = await fetchLatest(name, signal).catch(() => null)
+      if (!info || !info.version || !isNewer(current, info.version)) return null
+      return { name, configured: current, latest: info.version, date: info.date }
+    }),
+  )
+
+  return rows.filter((row): row is OutdatedPinnedRow => row !== null)
+}
+
 /**
  * Build a full copy-friendly markdown table comparing every configured
  * npm plugin against the latest on the registry.
@@ -165,14 +262,14 @@ export async function fetchLatestVersion(name: string, signal: AbortSignal): Pro
 export async function buildStatusTable(
   specs: Array<string | [string, Record<string, unknown>]>,
   signal: AbortSignal,
+  options: { cacheRoots?: string[]; fetchLatest?: typeof fetchLatestVersion } = {},
 ): Promise<string> {
   if (specs.length === 0) {
     return "No plugins configured in opencode.json / tui.json."
   }
 
   const locals: string[] = []
-  const latestEntries: { name: string }[] = []
-  const pinnedEntries: { name: string; current: string }[] = []
+  const npmEntries: { name: string; spec: string }[] = []
 
   for (const item of specs) {
     const spec = Array.isArray(item) ? String(item[0] ?? "") : String(item)
@@ -183,17 +280,12 @@ export async function buildStatusTable(
       continue
     }
 
-    const parsed = parseNpmSpec(spec)
-    if (!parsed) continue
-
-    if (parsed.kind === "latest") {
-      latestEntries.push({ name: parsed.name })
-    } else {
-      pinnedEntries.push({ name: parsed.name, current: parsed.configured })
-    }
+    const name = npmPackageName(spec)
+    if (!name) continue
+    npmEntries.push({ name, spec })
   }
 
-  if (pinnedEntries.length === 0 && latestEntries.length === 0) {
+  if (npmEntries.length === 0) {
     const lines = ["## Plugin Version Status", "", "No npm plugins configured."]
     if (locals.length > 0) {
       lines.push("", "Local file plugins (no version check):")
@@ -202,50 +294,45 @@ export async function buildStatusTable(
     return lines.join("\n")
   }
 
-  type Row = { name: string; configured: string; latest: string | null; date: string }
-  const rows: Row[] = []
-
-  const pinnedResults = await Promise.all(
-    pinnedEntries.map(async ({ name, current }) => {
-      const info = await fetchLatestVersion(name, signal)
-      return { name, configured: current, latest: info?.version ?? null, date: info?.date ?? "" }
+  const fetchLatest = options.fetchLatest ?? fetchLatestVersion
+  const rows = await Promise.all(
+    npmEntries.map(async ({ name, spec }) => {
+      const info = await fetchLatest(name, signal)
+      return {
+        name,
+        installed: readInstalledVersion(spec, options.cacheRoots),
+        latest: info?.version ?? null,
+        date: info?.date ?? "",
+      }
     }),
   )
-  rows.push(...pinnedResults)
-
-  const latestResults = await Promise.all(
-    latestEntries.map(async ({ name }) => {
-      const info = await fetchLatestVersion(name, signal)
-      return { name, configured: "latest", latest: info?.version ?? null, date: info?.date ?? "" }
-    }),
-  )
-  rows.push(...latestResults)
 
   const lines: string[] = [
     "## Plugin Version Status",
     "",
-    "| Plugin | Configured | Latest | Released | Status |",
-    "|--------|-----------|--------|----------|--------|",
+    "| Plugin | Installed | Latest Released | Status |",
+    "|--------|-----------|-----------------|--------|",
   ]
 
   let outdated = 0
   let currentCount = 0
-  let latestCount = 0
+  let missing = 0
   let errored = 0
 
   for (const row of rows) {
     const rel = formatDate(row.date)
-    if (!row.latest) {
-      lines.push(`| \`${row.name}\` | ${row.configured} | ❓ failed | — | error |`)
+    const latest = row.latest ? `${row.installed === row.latest ? row.latest : `**${row.latest}**`}${rel ? ` (${rel})` : ""}` : "❓ failed"
+    if (!row.installed) {
+      lines.push(`| \`${row.name}\` | not installed | ${latest} | not installed |`)
+      missing++
+    } else if (!row.latest) {
+      lines.push(`| \`${row.name}\` | ${row.installed} | ${latest} | unknown |`)
       errored++
-    } else if (row.configured === "latest") {
-      lines.push(`| \`${row.name}\` | latest → **${row.latest}** | ${row.latest} | ${rel || "—"} | (resolved) |`)
-      latestCount++
-    } else if (row.configured === row.latest) {
-      lines.push(`| \`${row.name}\` | ${row.configured} | ${row.latest} | ${rel || "—"} | ✅ current |`)
+    } else if (row.installed === row.latest) {
+      lines.push(`| \`${row.name}\` | ${row.installed} | ${latest} | ✅ current |`)
       currentCount++
     } else {
-      lines.push(`| \`${row.name}\` | ${row.configured} | **${row.latest}** | ${rel || "—"} | ⚠️ outdated |`)
+      lines.push(`| \`${row.name}\` | ${row.installed} | ${latest} | ⚠️ outdated |`)
       outdated++
     }
   }
@@ -254,7 +341,7 @@ export async function buildStatusTable(
   const parts: string[] = [`${rows.length} checked`]
   if (currentCount > 0) parts.push(`${currentCount} current`)
   if (outdated > 0) parts.push(`${outdated} outdated`)
-  if (latestCount > 0) parts.push(`${latestCount} @latest-resolved`)
+  if (missing > 0) parts.push(`${missing} not installed`)
   if (errored > 0) parts.push(`${errored} failed`)
   lines.push(`**Summary:** ${parts.join(" — ")}`)
 
@@ -264,7 +351,7 @@ export async function buildStatusTable(
     for (const s of locals) lines.push(`  - ${s}`)
   }
 
-  lines.push("", "> Tip: run `opencode plugin install <pkg>@<version>` to pin or update a plugin.")
+  lines.push("", "> Installed versions are read from OpenCode's plugin cache node_modules.")
 
   return lines.join("\n")
 }
