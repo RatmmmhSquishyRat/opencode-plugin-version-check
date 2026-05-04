@@ -1,10 +1,20 @@
 {
   "name": "opencode-plugin-version-check",
   "version": "1.0.0",
-  "description": "OpenCode plugin that checks for outdated pinned-version plugins on startup",
+  "description": "OpenCode plugin: startup outdated-plugin notification + CLI status table",
   "type": "module",
+  "scripts": {
+    "plugin-status": "bun scripts/plugin-status.ts --project ../..",
+    "plugin-status:here": "bun scripts/plugin-status.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "exports": {
     "./tui": "./src/index.ts",
     "./server": "./src/commands.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "bun-types": "^1.3.13",
+    "typescript": "^6.0.3"
   }
 }
