@@ -2,7 +2,7 @@
  * OpenCode Plugin: Version Check — server tool
  *
  * Registers a "plugin_status" tool for AI invocation.
- * The /plugin_status slash command is registered by the TUI entry (index.ts).
+ * User-facing status is available via `npm run plugin-status`.
  */
 
 import { buildStatusTable } from "./shared"
@@ -25,7 +25,7 @@ export default {
       tool: {
         plugin_status: {
           description:
-            "List all plugins configured in opencode.json/tui.json showing their configured version, latest npm version, and release date. Includes @latest entries (resolved).",
+            "List OpenCode plugins showing installed cache version, latest npm release, and release date.",
           args: {} as Record<string, never>,
           async execute(_args: Record<string, never>, ctx: { abort: AbortSignal }): Promise<string> {
             return buildStatusTable(pluginSpecs, ctx.abort)

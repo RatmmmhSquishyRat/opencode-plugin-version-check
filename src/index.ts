@@ -2,53 +2,29 @@
  * OpenCode Plugin: Version Check — TUI entry
  *
  * On startup: checks pinned-version plugins and notifies if any are outdated.
- * Registers /plugin_status slash command for manual full listing.
- * @latest entries are skipped during auto-check but included in manual listing.
+ * @latest entries are skipped during auto-check.
+ *
+ * For the full status table, run the standalone CLI script:
+ *   npm run plugin-status
  */
 
-import { buildStatusTable, fetchLatestVersion, isLocalPath, parseNpmSpec } from "./shared"
+import { buildOutdatedPinnedRows } from "./shared"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import path from "node:path"
+import { isLocalPath, npmPackageName } from "./shared"
+
+type PluginSpec = string | [string, Record<string, unknown>]
 
 // ---------------------------------------------------------------------------
 // Startup auto-check: notify only for outdated pinned plugins (skip @latest)
 // ---------------------------------------------------------------------------
 async function startupCheck(
-  specs: Array<string | [string, Record<string, unknown>]>,
+  specs: PluginSpec[],
   signal: AbortSignal,
   toast: (i: { variant?: string; title?: string; message: string; duration?: number }) => void,
 ) {
-  // Parse configured specs — skip @latest entries and local paths
-  const pinned: { name: string; current: string }[] = []
-
-  for (const item of specs) {
-    const spec = Array.isArray(item) ? String(item[0] ?? "") : String(item)
-    if (!spec) continue
-    if (isLocalPath(spec)) continue
-
-    const parsed = parseNpmSpec(spec)
-    if (!parsed || parsed.kind !== "pinned") continue
-
-    pinned.push({ name: parsed.name, current: parsed.configured })
-  }
-
-  if (pinned.length === 0) return
-
-  // Fetch latest versions in parallel
-  interface Row { name: string; configured: string; latest: string; date: string }
-  const outdated: Row[] = []
-
-  await Promise.all(
-    pinned.map(async ({ name, current }) => {
-      if (signal.aborted) return
-      try {
-        const info = await fetchLatestVersion(name, signal)
-        if (info && info.version && info.version !== current) {
-          outdated.push({ name, configured: current, latest: info.version, date: info.date })
-        }
-      } catch {
-        // network error → skip, don't bother user
-      }
-    }),
-  )
+  const outdated = await buildOutdatedPinnedRows(specs, signal).catch(() => [])
 
   if (outdated.length === 0) return
 
@@ -61,7 +37,7 @@ async function startupCheck(
       return `- \`${r.name}\`: ${r.configured} → **${r.latest}**${d}`
     }),
     "",
-    "Use `/plugin_status` to see the full report.",
+    "Run `npm run plugin-status` in the plugin-version-check repo for the full report.",
   ]
 
   toast({
@@ -72,39 +48,62 @@ async function startupCheck(
   })
 }
 
+function dedupeSpecs(...lists: Array<PluginSpec[] | undefined>): PluginSpec[] {
+  const seen = new Set<string>()
+  const result: PluginSpec[] = []
+  for (const list of lists) {
+    for (const item of list ?? []) {
+      const spec = Array.isArray(item) ? String(item[0] ?? "") : String(item)
+      if (!spec) continue
+      const key = spec.startsWith("file://") || isLocalPath(spec) ? spec : (npmPackageName(spec) ?? spec)
+      if (seen.has(key)) continue
+      seen.add(key)
+      result.push(item)
+    }
+  }
+  return result
+}
+
+function snapshotPath() {
+  const base = process.env.XDG_STATE_HOME ? process.env.XDG_STATE_HOME : path.join(homedir(), ".local", "state")
+  return path.join(base, "opencode", "plugin-version-check", "plugins.json")
+}
+
+function writePluginSnapshot(specs: PluginSpec[]) {
+  const file = snapshotPath()
+  try {
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          plugins: specs.map((item) => (Array.isArray(item) ? String(item[0] ?? "") : String(item))).filter(Boolean),
+        },
+        null,
+        2,
+      ),
+    )
+  } catch (error) {
+    console.warn(`[plugin-version-check] failed to write plugin snapshot: ${String(error)}`)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry
 // ---------------------------------------------------------------------------
 export default {
   id: "plugin-version-check",
   tui: async (api: Record<string, unknown>, _options: unknown, _meta: unknown) => {
-    const command = api.command as {
-      register(cb: () => unknown[]): () => void
-    }
-    const tuiConfig = api.tuiConfig as { plugin?: Array<string | [string, Record<string, unknown>]> }
+    const state = api.state as { config?: { plugin?: PluginSpec[] } }
+    const tuiConfig = api.tuiConfig as { plugin?: PluginSpec[] }
     const toast = (api.ui as { toast(i: { variant?: string; title?: string; message: string; duration?: number }): void })
       .toast.bind(api.ui)
     const signal = (api.lifecycle as { signal: AbortSignal }).signal
 
-    // 1) Startup check for outdated pinned plugins
-    const specs = tuiConfig.plugin ?? []
-    void startupCheck(specs, signal, toast)
-
-    // 2) Register /plugin_status slash command
-    command.register(() => [
-      {
-        title: "Plugin Version Status",
-        value: "plugin-version-check.status",
-        description: "List configured plugins vs npm registry (incl. release dates)",
-        slash: { name: "plugin_status", aliases: ["plugins", "check-plugins"] },
-        async onSelect() {
-          const table = await buildStatusTable(specs, signal)
-          toast({
-            message: table,
-            duration: 30_000,
-          })
-        },
-      },
-    ])
+    const specs = () => dedupeSpecs(state.config?.plugin, tuiConfig.plugin)
+    const current = specs()
+    writePluginSnapshot(current)
+    void startupCheck(current, signal, toast)
   },
 }
