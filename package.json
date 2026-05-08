@@ -6,7 +6,8 @@
   "scripts": {
     "plugin-status": "bun scripts/plugin-status.ts --project ../..",
     "plugin-status:here": "bun scripts/plugin-status.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "plugin-upgrade": "bun scripts/plugin-upgrade.ts"
   },
   "exports": {
     "./tui": "./src/index.ts",
