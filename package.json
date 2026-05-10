@@ -1,21 +1,72 @@
 {
-  "name": "opencode-plugin-version-check",
+  "name": "@ratteeth1/opencode-plugin-version-check",
   "version": "1.0.0",
   "description": "OpenCode plugin: startup outdated-plugin notification + CLI status table",
+  "license": "MIT",
+  "author": "",
+  "homepage": "https://github.com/RatmmmhSquishyRat/opencode-plugin-version-check#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RatmmmhSquishyRat/opencode-plugin-version-check.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RatmmmhSquishyRat/opencode-plugin-version-check/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "version-check",
+    "plugin-updates",
+    "productivity"
+  ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
+    "build": "tsup && tsc --emitDeclarationOnly",
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:package": "npm run check && bun scripts/verify-package.ts",
     "plugin-status": "bun scripts/plugin-status.ts --project ../..",
     "plugin-status:here": "bun scripts/plugin-status.ts",
-    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run check:package",
+    "test": "bun test",
+    "typecheck": "tsc --project tsconfig.typecheck.json",
     "plugin-upgrade": "bun scripts/plugin-upgrade.ts"
   },
   "exports": {
-    "./tui": "./src/index.ts",
-    "./server": "./src/commands.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/commands.d.ts",
+      "import": "./dist/commands.js"
+    }
+  },
+  "bin": {
+    "opencode-plugin-status": "./dist/scripts/plugin-status.js",
+    "opencode-plugin-upgrade": "./dist/scripts/plugin-upgrade.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.14.46"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "bun-types": "^1.3.13",
+    "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   }
 }

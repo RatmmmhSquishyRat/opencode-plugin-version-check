@@ -1,12 +1,18 @@
 {
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "noEmit": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
     "strict": true,
     "target": "ES2022",
-    "types": ["bun-types", "node"]
+    "types": ["bun-types", "node"],
+    "skipLibCheck": true
   },
-  "include": ["scripts/**/*.ts", "src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "test"]
 }
