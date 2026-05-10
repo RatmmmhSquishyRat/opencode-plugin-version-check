@@ -1,0 +1,15 @@
+node_modules/
+src/
+scripts/
+test/
+.github/
+dist/**/*.map
+*.log
+tsconfig.json
+tsconfig.typecheck.json
+tsup.config.ts
+package-lock.json
+.opencode/
+.sisyphus/
+.git/
+.gitignore
