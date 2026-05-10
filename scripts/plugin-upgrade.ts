@@ -20,7 +20,7 @@ import path from "node:path"
 // ---------------------------------------------------------------------------
 
 /** Replace the pinned version in a spec string.  Returns unchanged for
- *  @latest, git URLs, file paths, or unversioned specs. */
+ *  @latest, semver ranges, git URLs, file paths, or unversioned specs. */
 export function replaceVersionInSpec(spec: string, newVersion: string): string {
   if (spec.startsWith("file://") || spec.includes(":") && spec.includes("git+")) return spec
   if (spec.startsWith(".") || /^[A-Za-z]:[\\/]/.test(spec)) return spec
@@ -28,7 +28,7 @@ export function replaceVersionInSpec(spec: string, newVersion: string): string {
   const lastAt = findVersionAt(spec)
   if (lastAt < 0) return spec
   const currentVer = spec.slice(lastAt + 1)
-  if (/^[a-zA-Z]+$/.test(currentVer)) return spec // dist-tag
+  if (!isExactVersionSuffix(currentVer)) return spec
   return spec.slice(0, lastAt + 1) + newVersion
 }
 
@@ -40,6 +40,11 @@ function findVersionAt(spec: string): number {
     return spec.indexOf("@", slash + 1)
   }
   return spec.indexOf("@")
+}
+
+function isExactVersionSuffix(version: string): boolean {
+  const clean = version.replace(/^v/, "")
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(clean)
 }
 
 /** Extract package name from an npm spec, or null. */
@@ -71,7 +76,7 @@ export function pluginListForUpgrade(specs: Array<string | [string, unknown]>): 
     const lastAt = findVersionAt(spec)
     if (lastAt < 0) continue
     const current = spec.slice(lastAt + 1)
-    if (/^[a-zA-Z]+$/.test(current)) continue // dist-tag → skip
+    if (!isExactVersionSuffix(current)) continue
 
     result.push({ spec, name, current })
   }
@@ -369,7 +374,9 @@ async function main() {
   console.log(`\nBackup saved to ${backupPath}`)
 }
 
-main().catch((err) => {
-  console.error(`[error] ${String(err)}`)
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`[error] ${String(err)}`)
+    process.exit(1)
+  })
+}
